@@ -1,0 +1,280 @@
+---
+- name: Create a VIP, pool and pool members
+  hosts: all
+  connection: local
+
+
+  tasks:
+
+    - name: Include var file-01
+      include_vars:
+        file: var.yml
+
+
+
+# Identify the active and standby hosts
+    - name: Collect Device current information(s)
+      bigip_device_info:
+        gather_subset:
+          - devices
+        provider: "{{ provider }}"
+
+
+    - name: Identify Active/Standby host -- Step_01
+      set_fact:
+        active_host: "{{ ansible_net_devices[0].management_address }}"
+      when: ansible_net_devices[0].failover_state == "active"
+
+    - name: Identify Active/Standby host -- Step_02
+      set_fact:
+        standby_host: "{{ ansible_net_devices[0].management_address }}"
+      when: ansible_net_devices[0].failover_state == "standby"
+
+    - name: Identify Active/Standby host -- Step_03
+      set_fact:
+        active_host: "{{ ansible_net_devices[1].management_address }}"
+      when: ansible_net_devices[1].failover_state == "active"
+
+    - name: Identify Active/Standby host -- Step_04
+      set_fact:
+        standby_host: "{{ ansible_net_devices[1].management_address }}"
+      when: ansible_net_devices[1].failover_state == "standby"
+
+# Dynamically create the active and standby provider details
+
+    - name: Create status specific provider details
+      set_fact:
+        active_provider:
+            password: "{{ provider.password }}"
+            server: "{{ active_host }}"
+            user: "{{ provider.user }}"
+            validate_certs: no
+            server_port: 443
+        standby_provider:
+            password: "{{ provider.password }}"
+            server: "{{ standby_host }}"
+            user: "{{ provider.user }}"
+            validate_certs: no
+            server_port: 443
+
+# Create partition
+    - name: Create partition on active host
+      bigip_partition:
+        name: "{{ partitions.partition_name }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+
+# Get device group (type - sync-failover name "
+
+    - name: Collect device group info
+      bigip_device_info:
+        gather_subset:
+          - device-groups
+        provider: "{{ provider }}"
+      register: result
+
+    - name: Set device group name fact
+      set_fact:
+        dg_name: "{{ item.name }}"
+      when: item.type == "sync-failover"
+      loop: "{{ ansible_net_device_groups }}"
+
+
+# Sync to device groups from the active box to group
+#https://docs.ansible.com/ansible/latest/collections/f5networks/f5_modules/bigip_configsync_action_module.html
+
+    - name: Sync config to  greoups from primary
+      bigip_configsync_action:
+        device_group: "{{ dg_name }}"
+        sync_device_to_group: yes
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+
+# Create VLANs on active box
+    - name: Create Vlans on active box
+      bigip_vlan:
+        name: "{{ item.vlan_name }}"
+        tagged_interface: "{{ item.tagged_int }}"
+        tag: "{{ item.tag }}"
+        partition: "{{partitions.partition_name }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      loop: "{{ route_domain.vlans }}"
+
+# Create VLANs on standby box
+    - name: Create Vlans on standby box
+      bigip_vlan:
+        name: "{{ item.vlan_name }}"
+        tagged_interface: "{{ item.tagged_int }}"
+        tag: "{{ item.tag }}"
+        partition: "{{ partitions.partition_name }}"
+        provider: "{{ standby_provider }}"
+      delegate_to: localhost
+      loop: "{{ route_domain.vlans }}"
+
+# create route domain on active box
+    - name: Create a new Route Domain on active box 
+      bigip_routedomain:
+        name: "{{ route_domain.name }}"
+        id: "{{route_domain.id }}"
+        state: present
+        partition: "{{partitions.partition_name}}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+
+# create route domain on standby box
+    - name: Create a new Route Domain on stand box 
+      bigip_routedomain:
+        name: "{{  route_domain.name }}"
+        id: "{{route_domain.id}}"
+        state: present
+        partition: "{{partitions.partition_name}}"
+        provider: "{{ standby_provider }}"
+      delegate_to: localhost
+
+# add vlans into route domain Active box
+    - name: Assign vlans into route domain
+      bigip_routedomain:
+        name: "{{ route_domain.name }}"
+        state: present
+        vlans: "{{ vlans }}"
+
+        partition: "{{ partitions.partition_name }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      loop: "{{ route_domain.vlans }}"
+
+# add vlans into route domain Standby box
+    - name: Assign vlans into route domain
+      bigip_routedomain:
+        name: "{{ route_domain.name }}"
+        state: present
+        vlans: "{{ vlans }}"
+
+        partition: "{{ partitions.partition_name }}"
+        provider: "{{ standby_provider }}"
+      delegate_to: localhost
+      loop: "{{ route_domain.vlans }}"
+
+
+#create self SelfIP on active box
+    - name: Create SelfIP
+      bigip_selfip:
+        address: "{{ item.address }}"
+        name: "{{ item.name }}"
+        netmask: "{{ item.netmask }}"
+        vlan: "{{ item.vlan_name }}"
+        state: present
+        route_domain: "{{ route_domain.id }}"
+        partition: "{{ partitions.partition_name }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      with_list: "{{ self_ip_host1 }}"
+
+#create self SelfIP on active box
+    - name: Create SelfIP
+      bigip_selfip:
+        address: "{{ item.address }}"
+        name: "{{ item.name }}"
+        netmask: "{{ item.netmask }}"
+        vlan: "{{ item.vlan_name }}"
+        state: present
+        route_domain: "{{ route_domain.id }}"
+        partition: "{{ partitions.partition_name }}"
+        provider: "{{ standby_provider }}"
+      delegate_to: localhost
+      with_list: "{{ self_ip_host2 }}"
+
+# Create Floating IP in Active box
+
+    - name: Create Floating IP
+      bigip_selfip:
+        address: "{{ item.address }}"
+        name: "{{ item.name }}"
+        netmask: "{{ item.netmask }}"
+        vlan: "{{ item.vlan_name }}"
+        state: present
+        route_domain: "{{ route_domain.id }}"
+        partition: "{{ partitions.partition_name }}"
+        traffic_group: 'traffic-group-1'
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      with_list: "{{ float_ip }}"
+
+
+
+# create nodes 
+    - name: Create nodes  
+      bigip_node:
+        host: "{{ item.address }}%{{ route_domain.id }}"
+        name: "{{ item.name }}"
+        state: present
+        #route_domain: "{{ route_domain.id }}"
+        partition: "{{ partitions.partition_name }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      loop: "{{ nodes }}"
+
+
+# Create pools
+    - name: Creating Pools     
+      bigip_pool:
+        name: "{{ item.value.name }}"
+        state: present
+        partition: "{{ partitions.partition_name }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      with_dict: "{{ pools }}"
+
+
+# Assigning  Pool_members to pool
+
+    - name: Assigning members to pools
+      bigip_pool_member:
+        pool: "{{ item.0.name }}"
+        partition: "{{ partitions.partition_name }}"
+        name: "{{ item.1.name }}"
+        port: "{{ item.1.port }}"
+        host: "{{ ansible_default_ipv4['address'] }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      
+      loop: "{{ pools| subelements('members') }}" 
+
+# Create Virtual servers
+
+    - name: Add Virtual servers
+      bigip_virtual_server:
+        pool: "{{ item.pool }}"
+        partition: "{{ partitions.partition_name }}"
+        name: "{{ item.name }}"
+        destination: "{{ item.destination }}%{{ route_domain.id }}"
+        port: "{{ item.port }}"
+        state: present
+        snat: "{{ item.snat }}"
+        description: "{{ item.description }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      loop: "{{ virtual_servers }}"  
+
+# Add static Route - To NSX-T Pool
+
+    - name: Create static route with gateway address
+      bigip_static_route:
+        destination: "{{ item.destination }}"
+        netmask: "{{ item.netmask }}"
+        pool: "{{ item.pool }}"
+        name: "{{ item.name }}"
+        route_domain: "{{ route_domain.id }}"
+        partition: "{{ partitions.partition_name }}"
+        provider: "{{ active_provider }}"
+      delegate_to: localhost
+      loop: "{{ static_route }}" 
+
+# Final Syn to the standby group
+    - name: Sync config to  greoups from primary
+      bigip_configsync_action:
+        device_group: "{{ dg_name }}"
+        sync_device_to_group: yes
+        provider: "{{ active_provider }}"
+      delegate_to: localhost

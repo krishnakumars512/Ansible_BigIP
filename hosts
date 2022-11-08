@@ -1,0 +1,2 @@
+[bigip]
+dev_f5_node_01 ansible_host=10.60.254.20
