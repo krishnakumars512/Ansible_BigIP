@@ -11,3 +11,6 @@ This playbook will perform the below plays.
 4. Create new VLANs and SelfIps and Floating IPs.
 5. Create nodes, Pools and virtual servers
 6. Once all the resources are created make the final sync from the activive device to group.
+
+
+## ansible-playbook -i hosts f5_provisioning.yml
