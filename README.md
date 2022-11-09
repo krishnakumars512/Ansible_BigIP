@@ -2,6 +2,7 @@
 Ansible BigIP playbooks
 
 # This playbook will provision the LTM Nodes, pools and Virtual servers sing the inputs from the var file.
+# Its route domain and partition aware
 
 This playbook will perform the below plays.
 
